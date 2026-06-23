@@ -1,5 +1,11 @@
 # Intel MBP — Status
 
+## 2026-06-23 — APT/DKMS repair for Linux 6.17 HWE
+
+`apt upgrade` was blocked by `broadcom-sta-dkms` failing to build `wl.ko` for `6.17.0-29-generic` and `6.17.0-35-generic`. Patched the local DKMS source for Linux 6.17 kbuild/timer/cfg80211 changes, installed `wl.ko` for both kernels, and completed `dpkg --configure -a` / `apt-get -f install` / `apt-get upgrade`.
+
+Current package state is clean: `apt update` exits 0, `dpkg --audit` is empty, and simulated upgrade only shows phased `kpartx` deferrals. See `docs/apt-broadcom-sta-dkms-linux-6.17-2026-06-23.md`.
+
 ## 2026-06-11 — Initial doc (post-Mint-reinstall)
 
 **OS:** Linux Mint 22.3 · **Hostname:** intel-mbp · **User:** lg  
