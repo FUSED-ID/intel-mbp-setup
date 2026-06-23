@@ -116,6 +116,32 @@ broadcom-sta/6.30.223.271, 6.17.0-35-generic, x86_64: installed
 
 `apt upgrade` is safe for the current package set: the broken kernel packages are configured, and the Broadcom module builds for the installed Linux `6.17.0-29` and `6.17.0-35` kernels.
 
+Use the installed shortcut for manual updates:
+
+```bash
+mbp-update
+```
+
+The shortcut is installed at `/usr/local/bin/mbp-update`, with source tracked in this repo at `scripts/mbp-update`. It:
+
+- runs `apt-get update`
+- ensures the local Broadcom STA DKMS source carries the Linux 6.17 patch
+- runs `apt upgrade` interactively by default
+- reapplies the patch after upgrade in case `/usr/src` was overwritten
+- runs `dkms autoinstall`
+- runs `dpkg --configure -a`
+- runs `apt -f install`
+- prints the final APT, dpkg, DKMS, and patch-marker state
+
+Useful checks:
+
+```bash
+mbp-update --dry-run
+mbp-update --check
+```
+
+`mbp-update --dry-run` was verified on 2026-06-23. It made no package changes, refreshed APT metadata, simulated upgrade cleanly, confirmed `dpkg --audit` empty, confirmed DKMS entries for `6.17.0-29-generic` and `6.17.0-35-generic`, and confirmed local patch markers.
+
 There is still a patch continuum to maintain:
 
 - Future `6.17.0-*` kernel updates should normally work because DKMS will reuse the patched `/usr/src/broadcom-sta-6.30.223.271` source.

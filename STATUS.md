@@ -6,6 +6,16 @@
 
 Current package state is clean: `apt update` exits 0, `dpkg --audit` is empty, and simulated upgrade only shows phased `kpartx` deferrals. See `docs/apt-broadcom-sta-dkms-linux-6.17-2026-06-23.md`.
 
+Installed manual update shortcut:
+
+```bash
+mbp-update
+```
+
+Path: `/usr/local/bin/mbp-update`
+Source: `scripts/mbp-update`
+Dry run verified 2026-06-23: `mbp-update --dry-run` refreshed APT metadata, simulated upgrade cleanly, confirmed `dpkg --audit` empty, confirmed DKMS entries for `6.17.0-29-generic` and `6.17.0-35-generic`, and confirmed local patch markers.
+
 ## 2026-06-11 — Initial doc (post-Mint-reinstall)
 
 **OS:** Linux Mint 22.3 · **Hostname:** intel-mbp · **User:** lg  

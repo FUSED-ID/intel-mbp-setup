@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+COMMAND_NAME="mbp-update"
+LOG_FILE="/var/log/mbp-update.log"
+STA_VERSION="6.30.223.271"
+STA_SRC="/usr/src/broadcom-sta-${STA_VERSION}"
+FIXED_UPSTREAM_VERSION="6.30.223.271-23ubuntu1.2"
+
+usage() {
+  cat <<'USAGE'
+Usage: mbp-update [--yes] [--check] [--dry-run]
+
+Manual Intel MBP update helper while Linux Mint 22.x waits for the
+Broadcom STA DKMS Linux 6.17 fix to reach the normal update path.
+
+Default:
+  - refresh APT metadata
+  - make sure the local Broadcom STA DKMS source carries the Linux 6.17 patch
+  - run apt upgrade
+  - re-apply the patch if a package reinstall overwrote /usr/src
+  - run dkms autoinstall, dpkg --configure -a, apt -f install
+  - print final APT/DKMS status
+
+Options:
+  --yes      pass -y to apt upgrade / apt -f install
+  --check    no package changes; show current patch, APT, dpkg, and DKMS state
+  --dry-run  no package changes; simulate upgrade and show state
+USAGE
+}
+
+YES=0
+CHECK_ONLY=0
+DRY_RUN=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --yes|-y) YES=1 ;;
+    --check) CHECK_ONLY=1 ;;
+    --dry-run|-n) DRY_RUN=1 ;;
+    --help|-h) usage; exit 0 ;;
+    *)
+      echo "Unknown option: $arg" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "$(id -u)" != "0" ]]; then
+  exec sudo -E "$0" "$@"
+fi
+
+mkdir -p "$(dirname "$LOG_FILE")"
+touch "$LOG_FILE"
+chmod 0644 "$LOG_FILE"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+log() {
+  printf '\n[%s] %s\n' "$(date -Is)" "$*"
+}
+
+run() {
+  log "+ $*"
+  "$@"
+}
+
+apt_upgrade() {
+  if [[ "$YES" == "1" ]]; then
+    run apt-get upgrade -y
+  else
+    run apt upgrade
+  fi
+}
+
+apt_fix_install() {
+  if [[ "$YES" == "1" ]]; then
+    run apt-get -f install -y
+  else
+    run apt -f install
+  fi
+}
+
+installed_sta_package_version() {
+  dpkg-query -W -f='${Version}' broadcom-sta-dkms 2>/dev/null || true
+}
+
+upstream_fixed_package_installed() {
+  local installed
+  installed="$(installed_sta_package_version)"
+  [[ -n "$installed" ]] && dpkg --compare-versions "$installed" ge "$FIXED_UPSTREAM_VERSION"
+}
+
+backup_once() {
+  local file="$1"
+  local backup="${file}.mbp-update-backup"
+  [[ -f "$file" && ! -f "$backup" ]] && cp -a "$file" "$backup"
+}
+
+apply_broadcom_sta_617_patch() {
+  if upstream_fixed_package_installed; then
+    log "Upstream-fixed broadcom-sta-dkms $(installed_sta_package_version) is installed; local source patch not required."
+    return 0
+  fi
+
+  if [[ ! -d "$STA_SRC" ]]; then
+    log "Broadcom STA source not present at $STA_SRC; skipping local source patch."
+    return 0
+  fi
+
+  log "Ensuring local Broadcom STA DKMS source has Linux 6.17 compatibility patch."
+
+  local mf="$STA_SRC/Makefile"
+  local wl_linux="$STA_SRC/src/wl/sys/wl_linux.c"
+  local wl_cfg="$STA_SRC/src/wl/sys/wl_cfg80211_hybrid.c"
+
+  [[ -f "$mf" ]] || { echo "Missing $mf" >&2; return 1; }
+  [[ -f "$wl_linux" ]] || { echo "Missing $wl_linux" >&2; return 1; }
+  [[ -f "$wl_cfg" ]] || { echo "Missing $wl_cfg" >&2; return 1; }
+
+  backup_once "$mf"
+  backup_once "$wl_linux"
+  backup_once "$wl_cfg"
+
+  if ! grep -q 'ccflags-y[[:space:]]*.*EXTRA_CFLAGS' "$mf"; then
+    perl -0pi -e 's/(ifeq "\$\(GE_49\)" "1"\nEXTRA_CFLAGS       \+= -Wno-date-time\nendif\n)/$1\nccflags-y          += \$\(EXTRA_CFLAGS\)\nsubdir-ccflags-y   += \$\(EXTRA_CFLAGS\)\n/m' "$mf"
+  fi
+
+  if ! grep -q 'subdir-ccflags-y[[:space:]]*.*EXTRA_CFLAGS' "$mf"; then
+    perl -0pi -e 's/(ccflags-y          \+= \$\(EXTRA_CFLAGS\)\n)/$1subdir-ccflags-y   += \$\(EXTRA_CFLAGS\)\n/m' "$mf"
+  fi
+
+  if ! grep -q '^ldflags-y[[:space:]]*.*SHIPPED' "$mf"; then
+    perl -0pi -e 's/(EXTRA_LDFLAGS      := \$\(src\)\/lib\/\$\(SHIPPED\)\n)/ldflags-y           += \$\(src\)\/lib\/\$\(SHIPPED\)\n$1/m' "$mf"
+  fi
+
+  if ! grep -q 'timer_container_of' "$wl_linux"; then
+    perl -0pi -e 's/(#include <linux\/pci_ids\.h>\n)/$1#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)\n#ifndef from_timer\n#define from_timer(var, callback_timer, timer_fieldname) timer_container_of(var, callback_timer, timer_fieldname)\n#endif\n#ifndef del_timer\n#define del_timer timer_delete\n#endif\n#endif\n/' "$wl_linux"
+  fi
+
+  if ! grep -q 'KERNEL_VERSION(6, 17, 0)' "$wl_cfg"; then
+    perl -0pi -e 's/static s32 wl_cfg80211_set_wiphy_params\(struct wiphy \*wiphy, u32 changed\);/#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)\nstatic s32 wl_cfg80211_set_wiphy_params(struct wiphy *wiphy, int radio_idx, u32 changed);\n#else\nstatic s32 wl_cfg80211_set_wiphy_params(struct wiphy *wiphy, u32 changed);\n#endif/' "$wl_cfg"
+    perl -0pi -e 's/static s32 wl_cfg80211_set_wiphy_params\(struct wiphy \*wiphy, u32 changed\)\n\{/#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)\nstatic s32 wl_cfg80211_set_wiphy_params(struct wiphy *wiphy, int radio_idx, u32 changed)\n#else\nstatic s32 wl_cfg80211_set_wiphy_params(struct wiphy *wiphy, u32 changed)\n#endif\n{/' "$wl_cfg"
+
+    perl -0pi -e 's/#if LINUX_VERSION_CODE >= KERNEL_VERSION\(3, 8, 0\)\nstatic s32\nwl_cfg80211_set_tx_power\(struct wiphy \*wiphy, struct wireless_dev \*wdev,\n\s*enum nl80211_tx_power_setting type, s32 mbm\);/#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)\nstatic s32\nwl_cfg80211_set_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev,\n                         int radio_idx, enum nl80211_tx_power_setting type, s32 mbm);\n#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)\nstatic s32\nwl_cfg80211_set_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev,\n                         enum nl80211_tx_power_setting type, s32 mbm);/' "$wl_cfg"
+    perl -0pi -e 's/#if LINUX_VERSION_CODE >= KERNEL_VERSION\(3, 8, 0\)\nstatic s32\nwl_cfg80211_set_tx_power\(struct wiphy \*wiphy, struct wireless_dev \*wdev,\n\s*enum nl80211_tx_power_setting type, s32 mbm\)\n#elif/#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)\nstatic s32\nwl_cfg80211_set_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev,\n                         int radio_idx, enum nl80211_tx_power_setting type, s32 mbm)\n#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)\nstatic s32\nwl_cfg80211_set_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev,\n                         enum nl80211_tx_power_setting type, s32 mbm)\n#elif/' "$wl_cfg"
+
+    perl -0pi -e 's/#if LINUX_VERSION_CODE >= KERNEL_VERSION\(6, 14, 0\)\nstatic s32 wl_cfg80211_get_tx_power\(struct wiphy \*wiphy, struct wireless_dev \*wdev, u32 \/\*link_id\*\/, s32 \*dbm\);/#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)\nstatic s32 wl_cfg80211_get_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev, int radio_idx, unsigned int link_id, s32 *dbm);\n#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)\nstatic s32 wl_cfg80211_get_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev, u32 \/\*link_id\*\/, s32 *dbm);/' "$wl_cfg"
+    perl -0pi -e 's/#if LINUX_VERSION_CODE >= KERNEL_VERSION\(6, 14, 0\)\nstatic s32 wl_cfg80211_get_tx_power\(struct wiphy \*wiphy, struct wireless_dev \*wdev, u32 \/\*link_id\*\/, s32 \*dbm\)\n#elif/#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)\nstatic s32 wl_cfg80211_get_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev, int radio_idx, unsigned int link_id, s32 *dbm)\n#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)\nstatic s32 wl_cfg80211_get_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev, u32 \/\*link_id\*\/, s32 *dbm)\n#elif/' "$wl_cfg"
+  fi
+
+  grep -q 'ccflags-y[[:space:]]*.*EXTRA_CFLAGS' "$mf"
+  grep -q 'subdir-ccflags-y[[:space:]]*.*EXTRA_CFLAGS' "$mf"
+  grep -q '^ldflags-y[[:space:]]*.*SHIPPED' "$mf"
+  grep -q 'timer_container_of' "$wl_linux"
+  grep -q 'KERNEL_VERSION(6, 17, 0)' "$wl_cfg"
+
+  log "Broadcom STA local source patch is present."
+}
+
+print_state() {
+  log "System state"
+  echo "Kernel: $(uname -r)"
+  echo "broadcom-sta-dkms: $(installed_sta_package_version || true)"
+  echo
+
+  echo "APT simulation:"
+  apt-get -s upgrade | sed -n '1,120p'
+  echo
+
+  echo "dpkg audit:"
+  dpkg --audit || true
+  echo
+
+  echo "DKMS status:"
+  dkms status -m broadcom-sta -v "$STA_VERSION" || true
+  echo
+
+  if [[ -d "$STA_SRC" ]]; then
+    echo "Patch markers:"
+    grep -n 'ccflags-y\|subdir-ccflags-y\|ldflags-y\|timer_container_of\|KERNEL_VERSION(6, 17' \
+      "$STA_SRC/Makefile" \
+      "$STA_SRC/src/wl/sys/wl_linux.c" \
+      "$STA_SRC/src/wl/sys/wl_cfg80211_hybrid.c" 2>/dev/null | sed -n '1,80p' || true
+  fi
+}
+
+log "$COMMAND_NAME starting"
+
+if [[ "$CHECK_ONLY" == "1" || "$DRY_RUN" == "1" ]]; then
+  if [[ "$DRY_RUN" == "1" ]]; then
+    run apt-get update
+  fi
+  print_state
+  log "$COMMAND_NAME finished without package changes"
+  exit 0
+fi
+
+run apt-get update
+apply_broadcom_sta_617_patch
+
+APT_UPGRADE_FAILED=0
+apt_upgrade || APT_UPGRADE_FAILED=1
+
+# A package reinstall can overwrite /usr/src during upgrade; ensure continuity again.
+apply_broadcom_sta_617_patch
+
+DKMS_FAILED=0
+run dkms autoinstall || DKMS_FAILED=1
+
+CONFIGURE_FAILED=0
+run dpkg --configure -a || CONFIGURE_FAILED=1
+apt_fix_install || CONFIGURE_FAILED=1
+
+print_state
+
+if [[ "$APT_UPGRADE_FAILED" == "1" || "$DKMS_FAILED" == "1" || "$CONFIGURE_FAILED" == "1" ]]; then
+  log "$COMMAND_NAME finished with errors; see $LOG_FILE"
+  exit 1
+fi
+
+log "$COMMAND_NAME finished cleanly"
