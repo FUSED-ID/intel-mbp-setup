@@ -155,6 +155,10 @@ Do not enable the whole `noble-proposed` pocket globally for this node unless th
 
 ## Mint / Ubuntu Report Draft
 
+Posted as GitHub issue:
+
+- https://github.com/linuxmint/linuxmint/issues/891
+
 Title:
 
 ```text
