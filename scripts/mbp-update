@@ -47,8 +47,12 @@ for arg in "$@"; do
   esac
 done
 
-if [[ "$(id -u)" != "0" ]]; then
+if [[ "$(id -u)" != "0" && "$CHECK_ONLY" != "1" ]]; then
   exec sudo -E "$0" "$@"
+fi
+
+if [[ "$(id -u)" != "0" ]]; then
+  LOG_FILE="${TMPDIR:-/tmp}/mbp-update-check-${USER:-user}.log"
 fi
 
 mkdir -p "$(dirname "$LOG_FILE")"
